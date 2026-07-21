@@ -101,7 +101,12 @@ def load_data(username):
             sheet.append_row(headers)
             return pd.DataFrame(columns=headers)
         
-        return pd.DataFrame(data)
+        df = pd.DataFrame(data)
+        
+        # Convert Happiness Rating to numeric (fixes the string issue)
+        df["Happiness Rating"] = pd.to_numeric(df["Happiness Rating"], errors='coerce')
+        
+        return df
     except Exception as e:
         st.error(f"Error loading data: {e}")
         return pd.DataFrame(columns=[
@@ -472,15 +477,18 @@ def main():
                 filtered_df = filtered_df.sort_values(["Date", "Time"])
             
             # Display data
-            st.dataframe(filtered_df, use_container_width=True)
+            st.dataframe(filtered_df, width="stretch")
             
             # Summary statistics
             st.subheader("📈 Summary Statistics")
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                avg_happiness = filtered_df["Happiness Rating"].mean()
-                st.metric("Average Happiness", f"{avg_happiness:.1f}/10")
+                if len(filtered_df) > 0 and filtered_df["Happiness Rating"].notna().any():
+                    avg_happiness = filtered_df["Happiness Rating"].mean()
+                    st.metric("Average Happiness", f"{avg_happiness:.1f}/10")
+                else:
+                    st.metric("Average Happiness", "N/A")
             
             with col2:
                 total_entries = len(filtered_df)
@@ -488,14 +496,18 @@ def main():
             
             with col3:
                 sleep_entries = filtered_df[filtered_df["Activity"].str.lower().str.contains("sleep", na=False)]
-                if len(sleep_entries) > 0:
+                if len(sleep_entries) > 0 and sleep_entries["Happiness Rating"].notna().any():
                     avg_sleep_quality = sleep_entries["Happiness Rating"].mean()
                     st.metric("Avg Sleep Quality", f"{avg_sleep_quality:.1f}/10")
+                else:
+                    st.metric("Avg Sleep Quality", "N/A")
             
             with col4:
-                if filter_date != "All":
+                if filter_date != "All" and len(filtered_df) > 0:
                     exercise_status = filtered_df.iloc[0]["Exercise?"] if len(filtered_df) > 0 else "N/A"
                     st.metric("Exercise", exercise_status)
+                else:
+                    st.metric("Exercise", "N/A")
             
             # Download button
             csv = filtered_df.to_csv(index=False)
