@@ -3,9 +3,49 @@ import pandas as pd
 from datetime import datetime, date, time, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
+import hashlib
 
 # Set page config
 st.set_page_config(page_title="Time Audit Tracker", layout="wide")
+
+# User credentials - add your users here
+USERS = {
+    "kaylie": "bubbles",  # Change these!
+    "dustin": "gunston"
+}
+
+# Hash password for security
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+# Check login
+def check_login(username, password):
+    if username in USERS and USERS[username] == password:
+        return True
+    return False
+
+# Login page
+def login_page():
+    st.title("🔐 Time Audit Tracker - Login")
+    
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Login")
+        
+        if submit:
+            if check_login(username, password):
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.rerun()
+            else:
+                st.error("Invalid username or password")
+
+# Logout function
+def logout():
+    st.session_state.logged_in = False
+    st.session_state.username = None
+    st.rerun()
 
 # Google Sheets setup
 @st.cache_resource
@@ -22,12 +62,34 @@ def get_gsheet_client():
     
     return gspread.authorize(credentials)
 
-# Load data from Google Sheets
-@st.cache_data(ttl=10)
-def load_data():
+# Get or create user's spreadsheet
+def get_user_spreadsheet(username):
     try:
         client = get_gsheet_client()
-        sheet = client.open("Time Audit Data").sheet1
+        spreadsheet_name = f"Time Audit Data - {username}"
+        
+        try:
+            # Try to open existing spreadsheet
+            spreadsheet = client.open(spreadsheet_name)
+        except gspread.SpreadsheetNotFound:
+            # Create new spreadsheet if it doesn't exist
+            spreadsheet = client.create(spreadsheet_name)
+        
+        return spreadsheet.sheet1
+    except Exception as e:
+        st.error(f"Error accessing spreadsheet: {e}")
+        return None
+
+# Load data from Google Sheets
+def load_data(username):
+    try:
+        sheet = get_user_spreadsheet(username)
+        
+        if sheet is None:
+            return pd.DataFrame(columns=[
+                "Date", "Time", "Activity", "Happiness Rating", "Notes",
+                "Day Weather", "Day Breakfast", "Day Lunch", "Day Dinner", "Exercise?"
+            ])
         
         data = sheet.get_all_records()
         if len(data) == 0:
@@ -48,19 +110,18 @@ def load_data():
         ])
 
 # Save data to Google Sheets
-def save_data(df):
+def save_data(df, username):
     try:
-        client = get_gsheet_client()
-        sheet = client.open("Time Audit Data").sheet1
+        sheet = get_user_spreadsheet(username)
+        
+        if sheet is None:
+            return False
         
         # Clear existing data
         sheet.clear()
         
         # Write headers and data
         sheet.update([df.columns.values.tolist()] + df.values.tolist())
-        
-        # Clear cache so new data loads
-        st.cache_data.clear()
         
         return True
     except Exception as e:
@@ -79,16 +140,137 @@ def generate_time_slots():
     
     return slots
 
+# Generate sleep time slots between start and end time
+def generate_sleep_slots(sleep_start, sleep_end):
+    """Generate all 30-min slots between sleep start and end times"""
+    slots = []
+    
+    # Parse times
+    start_dt = datetime.strptime(sleep_start, "%I:%M %p")
+    end_dt = datetime.strptime(sleep_end, "%I:%M %p")
+    
+    # If end time is before start time, it means sleep crossed midnight
+    if end_dt <= start_dt:
+        end_dt += timedelta(days=1)
+    
+    current = start_dt
+    while current < end_dt:
+        slots.append(current.strftime("%I:%M %p"))
+        current += timedelta(minutes=30)
+    
+    return slots
+
+# Check if we need to log sleep for today
+def needs_sleep_entry(df, entry_date):
+    """Check if there's already sleep data for this date"""
+    day_entries = df[df["Date"] == str(entry_date)]
+    
+    if len(day_entries) == 0:
+        return True
+    
+    # Check if any entry has "Sleep" or "Sleeping" as activity
+    sleep_entries = day_entries[day_entries["Activity"].str.lower().str.contains("sleep", na=False)]
+    
+    return len(sleep_entries) == 0
+
+# Sleep entry form
+def sleep_entry_form(df, entry_date, username):
+    st.header("😴 First, let's log your sleep!")
+    st.info("Since this is your first entry for today, please log your sleep hours first.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        time_slots = generate_time_slots()
+        sleep_start = st.selectbox("What time did you go to sleep?", time_slots, 
+                                   index=time_slots.index("10:00 PM") if "10:00 PM" in time_slots else 0)
+    
+    with col2:
+        sleep_end = st.selectbox("What time did you wake up?", time_slots,
+                                 index=time_slots.index("07:00 AM") if "07:00 AM" in time_slots else 0)
+    
+    sleep_rating = st.slider("How would you rate your sleep quality?", 1, 10, 7)
+    
+    sleep_notes = st.text_area("Sleep notes (optional)", 
+                               placeholder="Any dreams? Sleep disturbances? How do you feel?")
+    
+    # Show preview of time slots that will be filled
+    preview_slots = generate_sleep_slots(sleep_start, sleep_end)
+    st.info(f"This will fill {len(preview_slots)} time slots from {sleep_start} to {sleep_end}")
+    
+    # Daily info section
+    st.subheader("📅 Daily Information")
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        day_weather = st.text_input("Weather", placeholder="Sunny, rainy, cloudy...")
+        day_breakfast = st.text_input("Breakfast", placeholder="What did you eat?")
+    
+    with col4:
+        day_lunch = st.text_input("Lunch", placeholder="What did you eat?")
+        day_dinner = st.text_input("Dinner", placeholder="What did you eat?")
+    
+    day_exercise = st.radio("Exercise?", ["Yes", "No"])
+    
+    if st.button("💾 Save Sleep Entry", type="primary"):
+        # Generate all sleep time slots
+        sleep_slots = generate_sleep_slots(sleep_start, sleep_end)
+        
+        # Create entries for each sleep slot
+        new_entries = []
+        for slot in sleep_slots:
+            new_entry = {
+                "Date": str(entry_date),
+                "Time": slot,
+                "Activity": "Sleep",
+                "Happiness Rating": sleep_rating,
+                "Notes": sleep_notes if sleep_notes else "",
+                "Day Weather": day_weather,
+                "Day Breakfast": day_breakfast,
+                "Day Lunch": day_lunch,
+                "Day Dinner": day_dinner,
+                "Exercise?": day_exercise
+            }
+            new_entries.append(new_entry)
+        
+        # Add all entries to dataframe
+        new_df = pd.concat([df, pd.DataFrame(new_entries)], ignore_index=True)
+        
+        if save_data(new_df, username):
+            st.success(f"✅ Saved {len(sleep_slots)} sleep entries from {sleep_start} to {sleep_end}")
+            st.balloons()
+            st.rerun()
+        
+    return True
+
 # Main app
 def main():
-    st.title("⏰ Time Audit Tracker")
+    # Check if user is logged in
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
     
-    # Load existing data
-    df = load_data()
+    if not st.session_state.logged_in:
+        login_page()
+        return
+    
+    # User is logged in
+    username = st.session_state.username
+    
+    st.title(f"⏰ Time Audit Tracker - Welcome {username.capitalize()}!")
+    
+    # Logout button in sidebar
+    with st.sidebar:
+        st.write(f"Logged in as: **{username}**")
+        if st.button("🚪 Logout"):
+            logout()
+    
+    # Load existing data for this user
+    df = load_data(username)
     
     # Sidebar for navigation
     st.sidebar.header("Navigation")
-    mode = st.sidebar.radio("Choose Mode", ["Log Entry", "View Data", "Edit Day Info"])
+    mode = st.sidebar.radio("Choose Mode", ["Log Entry", "Log Sleep", "View Data", "Edit Day Info"])
     
     if mode == "Log Entry":
         st.header("📝 Log Time Entry")
@@ -97,6 +279,15 @@ def main():
         
         with col1:
             entry_date = st.date_input("Date", value=date.today())
+        
+        # Check if we need sleep entry first
+        if needs_sleep_entry(df, entry_date):
+            st.warning("⚠️ You haven't logged your sleep for this day yet!")
+            st.info("Please go to 'Log Sleep' in the sidebar first, or continue to log this activity.")
+            
+            if st.button("Go to Sleep Entry"):
+                st.session_state.force_sleep_mode = True
+                st.rerun()
         
         with col2:
             time_slots = generate_time_slots()
@@ -163,11 +354,23 @@ def main():
                     df = pd.concat([df, pd.DataFrame([new_entry])], ignore_index=True)
                     message = f"✅ Saved entry for {entry_date} at {entry_time}"
                 
-                if save_data(df):
+                if save_data(df, username):
                     st.success(message)
                     st.rerun()
             else:
                 st.error("⚠️ Please enter an activity!")
+    
+    elif mode == "Log Sleep":
+        entry_date = st.date_input("Date", value=date.today())
+        
+        # Check if sleep already exists for this day
+        if not needs_sleep_entry(df, entry_date):
+            st.warning(f"You've already logged sleep for {entry_date}")
+            if st.button("Re-enter sleep data (will overwrite)"):
+                # Delete existing sleep entries for this date
+                df = df[~((df["Date"] == str(entry_date)) & (df["Activity"].str.lower().str.contains("sleep", na=False)))]
+        
+        sleep_entry_form(df, entry_date, username)
     
     elif mode == "View Data":
         st.header("📊 View Your Data")
@@ -202,7 +405,7 @@ def main():
             
             # Summary statistics
             st.subheader("📈 Summary Statistics")
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
                 avg_happiness = filtered_df["Happiness Rating"].mean()
@@ -213,6 +416,12 @@ def main():
                 st.metric("Total Entries", total_entries)
             
             with col3:
+                sleep_entries = filtered_df[filtered_df["Activity"].str.lower().str.contains("sleep", na=False)]
+                if len(sleep_entries) > 0:
+                    avg_sleep_quality = sleep_entries["Happiness Rating"].mean()
+                    st.metric("Avg Sleep Quality", f"{avg_sleep_quality:.1f}/10")
+            
+            with col4:
                 if filter_date != "All":
                     exercise_status = filtered_df.iloc[0]["Exercise?"] if len(filtered_df) > 0 else "N/A"
                     st.metric("Exercise", exercise_status)
@@ -222,7 +431,7 @@ def main():
             st.download_button(
                 label="📥 Download Data as CSV",
                 data=csv,
-                file_name=f"time_audit_{datetime.now().strftime('%Y%m%d')}.csv",
+                file_name=f"time_audit_{username}_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv"
             )
     
@@ -266,7 +475,7 @@ def main():
                     df.loc[df["Date"] == selected_date, "Day Dinner"] = new_dinner
                     df.loc[df["Date"] == selected_date, "Exercise?"] = new_exercise
                     
-                    if save_data(df):
+                    if save_data(df, username):
                         st.success(f"✅ Updated daily info for {selected_date}")
                         st.rerun()
 
