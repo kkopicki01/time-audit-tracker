@@ -140,25 +140,154 @@ def generate_time_slots():
     
     return slots
 
-# Generate sleep time slots between start and end time
-def generate_sleep_slots(sleep_start, sleep_end):
-    """Generate all 30-min slots between sleep start and end times"""
+# Generate sleep time slots between start and end time, handling date changes
+def generate_sleep_slots_with_dates(sleep_start, sleep_end, wake_date):
+    """Generate all 30-min slots between sleep start and end times with correct dates"""
     slots = []
     
     # Parse times
-    start_dt = datetime.strptime(sleep_start, "%I:%M %p")
-    end_dt = datetime.strptime(sleep_end, "%I:%M %p")
+    start_time = datetime.strptime(sleep_start, "%I:%M %p")
+    end_time = datetime.strptime(sleep_end, "%I:%M %p")
     
-    # If end time is before start time, it means sleep crossed midnight
-    if end_dt <= start_dt:
-        end_dt += timedelta(days=1)
+    # Wake date is the date selected by user
+    wake_datetime = datetime.combine(wake_date, end_time.time())
     
-    current = start_dt
-    while current < end_dt:
-        slots.append(current.strftime("%I:%M %p"))
+    # If end time is before or equal to start time, sleep crossed midnight
+    if end_time.time() <= start_time.time():
+        # Sleep started the previous day
+        sleep_datetime = wake_datetime - timedelta(days=1)
+        sleep_datetime = sleep_datetime.replace(hour=start_time.hour, minute=start_time.minute)
+    else:
+        # Sleep started same day (nap)
+        sleep_datetime = wake_datetime.replace(hour=start_time.hour, minute=start_time.minute)
+    
+    current = sleep_datetime
+    while current < wake_datetime:
+        slot_date = current.date()
+        slot_time = current.strftime("%I:%M %p")
+        slots.append((str(slot_date), slot_time))
         current += timedelta(minutes=30)
     
     return slots
+
+# Sleep entry form
+def sleep_entry_form(df, entry_date, username):
+    st.header("😴 First, let's log your sleep!")
+    st.info(f"Logging sleep for the night ending on {entry_date.strftime('%B %d, %Y')}")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        time_slots = generate_time_slots()
+        sleep_start = st.selectbox("What time did you go to sleep?", time_slots, 
+                                   index=time_slots.index("10:30 PM") if "10:30 PM" in time_slots else 0)
+    
+    with col2:
+        sleep_end = st.selectbox("What time did you wake up?", time_slots,
+                                 index=time_slots.index("06:30 AM") if "06:30 AM" in time_slots else 0)
+    
+    sleep_rating = st.slider("How would you rate your sleep quality?", 1, 10, 7)
+    
+    sleep_notes = st.text_area("Sleep notes (optional)", 
+                               placeholder="Any dreams? Sleep disturbances? How do you feel?")
+    
+    # Show preview of time slots that will be filled
+    preview_slots = generate_sleep_slots_with_dates(sleep_start, sleep_end, entry_date)
+    
+    # Determine if sleep crossed midnight
+    start_time = datetime.strptime(sleep_start, "%I:%M %p")
+    end_time = datetime.strptime(sleep_end, "%I:%M %p")
+    crossed_midnight = end_time.time() <= start_time.time()
+    
+    if crossed_midnight:
+        prev_date = entry_date - timedelta(days=1)
+        st.info(f"✨ This will fill {len(preview_slots)} time slots from {sleep_start} on **{prev_date.strftime('%b %d')}** to {sleep_end} on **{entry_date.strftime('%b %d')}**")
+    else:
+        st.info(f"This will fill {len(preview_slots)} time slots from {sleep_start} to {sleep_end} on **{entry_date.strftime('%b %d')}** (same day - nap?)")
+    
+    # Daily info section - this should be for the WAKE UP date
+    st.subheader(f"📅 Daily Information for {entry_date.strftime('%B %d, %Y')}")
+    
+    # Check if there's already daily info for the wake date
+    existing_wake_entries = df[df["Date"] == str(entry_date)]
+    
+    if len(existing_wake_entries) > 0:
+        day_weather = existing_wake_entries.iloc[0]["Day Weather"]
+        day_breakfast = existing_wake_entries.iloc[0]["Day Breakfast"]
+        day_lunch = existing_wake_entries.iloc[0]["Day Lunch"]
+        day_dinner = existing_wake_entries.iloc[0]["Day Dinner"]
+        day_exercise = existing_wake_entries.iloc[0]["Exercise?"]
+        
+        st.info(f"Using existing day info for {entry_date}: Weather: {day_weather}, Exercise: {day_exercise}")
+    else:
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            day_weather = st.text_input("Weather", placeholder="Sunny, rainy, cloudy...")
+            day_breakfast = st.text_input("Breakfast", placeholder="What did you eat?")
+        
+        with col4:
+            day_lunch = st.text_input("Lunch", placeholder="What did you eat?")
+            day_dinner = st.text_input("Dinner", placeholder="What did you eat?")
+        
+        day_exercise = st.radio("Exercise?", ["Yes", "No"])
+    
+    if st.button("💾 Save Sleep Entry", type="primary"):
+        # Generate all sleep time slots with correct dates
+        sleep_slots = generate_sleep_slots_with_dates(sleep_start, sleep_end, entry_date)
+        
+        # Create entries for each sleep slot
+        new_entries = []
+        for slot_date, slot_time in sleep_slots:
+            # Get daily info for this date
+            # Sleep slots on previous day don't need full daily info
+            existing_entries = df[df["Date"] == slot_date]
+            
+            if len(existing_entries) > 0:
+                # Use existing daily info
+                slot_weather = existing_entries.iloc[0]["Day Weather"]
+                slot_breakfast = existing_entries.iloc[0]["Day Breakfast"]
+                slot_lunch = existing_entries.iloc[0]["Day Lunch"]
+                slot_dinner = existing_entries.iloc[0]["Day Dinner"]
+                slot_exercise = existing_entries.iloc[0]["Exercise?"]
+            elif slot_date == str(entry_date):
+                # This is the wake date, use the info we collected
+                slot_weather = day_weather
+                slot_breakfast = day_breakfast
+                slot_lunch = day_lunch
+                slot_dinner = day_dinner
+                slot_exercise = day_exercise
+            else:
+                # Previous day - use empty/placeholder values
+                slot_weather = ""
+                slot_breakfast = ""
+                slot_lunch = ""
+                slot_dinner = ""
+                slot_exercise = ""
+            
+            new_entry = {
+                "Date": slot_date,
+                "Time": slot_time,
+                "Activity": "Sleep",
+                "Happiness Rating": sleep_rating,
+                "Notes": sleep_notes if sleep_notes else "",
+                "Day Weather": slot_weather,
+                "Day Breakfast": slot_breakfast,
+                "Day Lunch": slot_lunch,
+                "Day Dinner": slot_dinner,
+                "Exercise?": slot_exercise
+            }
+            new_entries.append(new_entry)
+        
+        # Add all entries to dataframe
+        new_df = pd.concat([df, pd.DataFrame(new_entries)], ignore_index=True)
+        
+        if save_data(new_df, username):
+            st.success(f"✅ Saved {len(sleep_slots)} sleep entries from {sleep_start} to {sleep_end}")
+            st.balloons()
+            st.rerun()
+        
+    return True
 
 # Check if we need to log sleep for today
 def needs_sleep_entry(df, entry_date):
@@ -173,76 +302,18 @@ def needs_sleep_entry(df, entry_date):
     
     return len(sleep_entries) == 0
 
-# Sleep entry form
-def sleep_entry_form(df, entry_date, username):
-    st.header("😴 First, let's log your sleep!")
-    st.info("Since this is your first entry for today, please log your sleep hours first.")
+# Check if we need to log sleep for today
+def needs_sleep_entry(df, entry_date):
+    """Check if there's already sleep data ending on this date"""
+    day_entries = df[df["Date"] == str(entry_date)]
     
-    col1, col2 = st.columns(2)
+    if len(day_entries) == 0:
+        return True
     
-    with col1:
-        time_slots = generate_time_slots()
-        sleep_start = st.selectbox("What time did you go to sleep?", time_slots, 
-                                   index=time_slots.index("10:00 PM") if "10:00 PM" in time_slots else 0)
+    # Check if any entry has "Sleep" or "Sleeping" as activity
+    sleep_entries = day_entries[day_entries["Activity"].str.lower().str.contains("sleep", na=False)]
     
-    with col2:
-        sleep_end = st.selectbox("What time did you wake up?", time_slots,
-                                 index=time_slots.index("07:00 AM") if "07:00 AM" in time_slots else 0)
-    
-    sleep_rating = st.slider("How would you rate your sleep quality?", 1, 10, 7)
-    
-    sleep_notes = st.text_area("Sleep notes (optional)", 
-                               placeholder="Any dreams? Sleep disturbances? How do you feel?")
-    
-    # Show preview of time slots that will be filled
-    preview_slots = generate_sleep_slots(sleep_start, sleep_end)
-    st.info(f"This will fill {len(preview_slots)} time slots from {sleep_start} to {sleep_end}")
-    
-    # Daily info section
-    st.subheader("📅 Daily Information")
-    
-    col3, col4 = st.columns(2)
-    
-    with col3:
-        day_weather = st.text_input("Weather", placeholder="Sunny, rainy, cloudy...")
-        day_breakfast = st.text_input("Breakfast", placeholder="What did you eat?")
-    
-    with col4:
-        day_lunch = st.text_input("Lunch", placeholder="What did you eat?")
-        day_dinner = st.text_input("Dinner", placeholder="What did you eat?")
-    
-    day_exercise = st.radio("Exercise?", ["Yes", "No"])
-    
-    if st.button("💾 Save Sleep Entry", type="primary"):
-        # Generate all sleep time slots
-        sleep_slots = generate_sleep_slots(sleep_start, sleep_end)
-        
-        # Create entries for each sleep slot
-        new_entries = []
-        for slot in sleep_slots:
-            new_entry = {
-                "Date": str(entry_date),
-                "Time": slot,
-                "Activity": "Sleep",
-                "Happiness Rating": sleep_rating,
-                "Notes": sleep_notes if sleep_notes else "",
-                "Day Weather": day_weather,
-                "Day Breakfast": day_breakfast,
-                "Day Lunch": day_lunch,
-                "Day Dinner": day_dinner,
-                "Exercise?": day_exercise
-            }
-            new_entries.append(new_entry)
-        
-        # Add all entries to dataframe
-        new_df = pd.concat([df, pd.DataFrame(new_entries)], ignore_index=True)
-        
-        if save_data(new_df, username):
-            st.success(f"✅ Saved {len(sleep_slots)} sleep entries from {sleep_start} to {sleep_end}")
-            st.balloons()
-            st.rerun()
-        
-    return True
+    return len(sleep_entries) == 0
 
 # Main app
 def main():
